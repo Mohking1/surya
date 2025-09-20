@@ -20,7 +20,10 @@ class OCRErrorModelLoader(ModelLoader):
             self.checkpoint = settings.OCR_ERROR_MODEL_CHECKPOINT
 
     def model(
-        self, device=settings.TORCH_DEVICE_MODEL, dtype=settings.MODEL_DTYPE
+        self,
+        device=settings.TORCH_DEVICE_MODEL,
+        dtype=settings.MODEL_DTYPE,
+        attention_implementation: Optional[str] = None,
     ) -> DistilBertForSequenceClassification:
         if device is None:
             device = settings.TORCH_DEVICE_MODEL
@@ -31,7 +34,7 @@ class OCRErrorModelLoader(ModelLoader):
         model = (
             DistilBertForSequenceClassification.from_pretrained(
                 self.checkpoint,
-                torch_dtype=dtype,
+                dtype=dtype,
                 config=config,
             )
             .to(device)

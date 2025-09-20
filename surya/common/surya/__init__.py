@@ -1,25 +1,23 @@
-from typing import Optional, TypedDict
+from typing import Optional, Tuple, TypedDict
 import warnings
 from dataclasses import dataclass
 
 import torch
 from torch import nn
 import torch.nn.functional as F
-from transformers import PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.cache_utils import Cache
+from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 
+from surya.common.pretrained import SuryaPreTrainedModel
 from surya.common.s3 import S3DownloaderMixin
 from surya.common.surya.config import SuryaModelConfig
 from surya.common.surya.decoder import SuryaDecoderModel
 from surya.common.surya.embedder import SimpleTokenEmbedder
 from surya.common.surya.encoder import SuryaEncoderModel
-
-from transformers.utils import is_flash_attn_2_available
+from surya.settings import settings
 
 from surya.logging import get_logger
-
-if is_flash_attn_2_available():
-    from surya.common.surya.flash_attn_utils import _get_unpad_data
 
 logger = get_logger()
 
@@ -54,7 +52,27 @@ class FlashAttentionKwargs(TypedDict, total=False):
 class KwargsForCausalLM(FlashAttentionKwargs): ...
 
 
-class SuryaModel(S3DownloaderMixin, PreTrainedModel):
+class DistanceProjection(nn.Module):
+    def __init__(self, in_features: int, out_features: int):
+        super().__init__()
+        self.fc1 = nn.Linear(in_features, out_features)
+        self.act = nn.SiLU()
+        self.fc2 = nn.Linear(out_features, out_features)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.fc2(x)
+        return x
+
+    def init_weights(self):
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.xavier_uniform_(self.fc2.weight)
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.zeros_(self.fc2.bias)
+
+
+class SuryaModel(S3DownloaderMixin, SuryaPreTrainedModel):
     config_class = SuryaModelConfig
     supports_gradient_checkpointing = True
     _skip_keys_device_placement = ["past_key_values"]
@@ -74,8 +92,9 @@ class SuryaModel(S3DownloaderMixin, PreTrainedModel):
         embedder: SimpleTokenEmbedder = None,
         vision_encoder: SuryaEncoderModel = None,
         decoder: SuryaDecoderModel = None,
+        **kwargs,
     ):
-        super().__init__(config)
+        super().__init__(config, **kwargs)
 
         if vision_encoder is None:
             vision_encoder = SuryaEncoderModel(config.vision_encoder)
@@ -108,6 +127,19 @@ class SuryaModel(S3DownloaderMixin, PreTrainedModel):
         self.bbox_head = nn.Linear(config.hidden_size, 6)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size)
 
+        if (
+            self.config.multi_output_distance is not None
+            and self.config.multi_output_distance > 0
+        ):
+            self.multi_output_projections = nn.ModuleList(
+                [
+                    DistanceProjection(
+                        in_features=config.hidden_size, out_features=config.hidden_size
+                    )
+                    for _ in range(self.config.multi_output_distance)
+                ]
+            )
+
     def tie_weights(self):
         self._tie_weights()
 
@@ -126,6 +158,35 @@ class SuryaModel(S3DownloaderMixin, PreTrainedModel):
 
     def set_input_embeddings(self, new_embeddings: nn.Module):
         self.embedder.token_embed = new_embeddings
+
+    def maybe_static_pad_image_inputs(
+        self,
+        chunk_pixels: torch.Tensor,
+        chunk_grid_thw: torch.Tensor,
+        actual_chunk_len: int,
+        encoder_chunk_size: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        valid_embed_len = actual_chunk_len // (
+            self.vision_encoder.spatial_merge_size**2
+        )
+        if settings.FOUNDATION_STATIC_CACHE and actual_chunk_len < encoder_chunk_size:
+            padding_len = encoder_chunk_size - actual_chunk_len
+            padding = torch.zeros(
+                padding_len,
+                *chunk_pixels.shape[1:],
+                device=chunk_pixels.device,
+                dtype=chunk_pixels.dtype,
+            )
+            chunk_pixels = torch.cat([chunk_pixels, padding], dim=0)
+
+            padding_grid = torch.tensor(
+                [[1, 2, padding_len // 2]],
+                device=chunk_grid_thw.device,
+                dtype=chunk_grid_thw.dtype,
+            )
+            chunk_grid_thw = torch.cat([chunk_grid_thw, padding_grid], dim=0)
+
+        return chunk_pixels, chunk_grid_thw, valid_embed_len
 
     def get_image_embeddings(
         self,
@@ -163,11 +224,20 @@ class SuryaModel(S3DownloaderMixin, PreTrainedModel):
             end = chunks[i + 1]
             grid_start = grid_chunks[i]
             grid_end = grid_chunks[i + 1]
-            chunk_embeddings = self.vision_encoder.embed_images(
-                image_batch=pixel_values[start:end],
-                grid_thw=grid_thw[grid_start:grid_end],
+
+            chunk_pixels = pixel_values[start:end]
+            chunk_grid_thw = grid_thw[grid_start:grid_end]
+            actual_chunk_len = end - start
+            chunk_pixels, chunk_grid_thw, valid_embed_len = (
+                self.maybe_static_pad_image_inputs(
+                    chunk_pixels, chunk_grid_thw, actual_chunk_len, encoder_chunk_size
+                )
             )
-            embeddings.append(chunk_embeddings)
+
+            chunk_embeddings = self.vision_encoder.embed_images(
+                image_batch=chunk_pixels, grid_thw=chunk_grid_thw
+            )
+            embeddings.append(chunk_embeddings[:valid_embed_len])
 
         if len(embeddings) == 0:
             raise ValueError(
@@ -271,34 +341,78 @@ class SuryaModel(S3DownloaderMixin, PreTrainedModel):
             all_embeddings, dim=0
         )  # Shape is num_image_tokens x embed_dim
 
+    def get_logits(self, hidden_states):
+        assert hidden_states.shape[1] == 1, (
+            "Multi output predictions only applied on the last token"
+        )
+
+        all_lm_logits = []
+        all_bbox_logits = []
+
+        current_hidden = hidden_states
+
+        # Loop includes initial prediction (i=0) plus multi_out_distance additional predictions
+        for i in range(self.config.multi_output_distance + 1):
+            if i > 0:
+                current_hidden = self.multi_output_projections[i - 1](current_hidden)
+
+            lm_logits = self.lm_head(current_hidden)
+            bbox_logits = F.sigmoid(self.bbox_head(current_hidden))
+
+            all_lm_logits.append(lm_logits)
+            all_bbox_logits.append(bbox_logits)
+
+        # Concatenate along sequence dimension (dim=1)
+        final_lm_logits = torch.cat(all_lm_logits, dim=1)
+        final_bbox_logits = torch.cat(all_bbox_logits, dim=1)
+
+        return final_lm_logits, final_bbox_logits
+
     def forward(
         self,
         input_ids=None,
+        labels=None,
         image_tiles=None,
         grid_thw=None,
         inputs_embeds=None,
         attention_mask=None,
         position_ids=None,
+        cache_position=None,
         past_key_values=None,
         output_hidden_states=False,
         output_attentions=False,
         use_cache=False,
+        encoder_chunk_size=32768,
+        cache_idxs=None,
+        num_valid_tokens=None,
+        prefill=True,
+        text_lengths=None,
         logits_to_keep=None,
-        encoder_chunk_size=None,
         **kwargs: KwargsForCausalLM,
     ):
         # Process the mixed batch if provided
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_ids_boxes_images(
-                input_ids, image_tiles, grid_thw, encoder_chunk_size
+        if any(
+            [
+                input_ids is None,
+                (prefill and (image_tiles is None or grid_thw is None)),
+                position_ids is None,
+                cache_position is None,
+            ]
+        ):
+            raise ValueError(
+                "`input_ids`, `position_ids`, and `cache_position` **must** be specified. `image_tiles` and `grid_thw` are required for prefill"
             )
+
+        inputs_embeds = self.embed_ids_boxes_images(
+            input_ids, image_tiles, grid_thw, encoder_chunk_size
+        )
 
         # Handling flash attention kwargs outside the decoder to speed up + avoid graph breaks inside the decoder
         # Skipped during decoding since not required
-        if (
-            self.decoder.config._attn_implementation == "flash_attention_2"
-            and inputs_embeds.shape[1] != 1
-        ):
+        if self.decoder.config._attn_implementation == "flash_attention_2" and prefill:
+            # Needed for CPU -> GPU
+            from surya.common.surya.flash_attn_utils import _get_unpad_data
+
             batch_size, query_length, _ = inputs_embeds.shape
             indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(
                 attention_mask
@@ -309,30 +423,175 @@ class SuryaModel(S3DownloaderMixin, PreTrainedModel):
             kwargs["cu_seqlens_k"] = cu_seqlens_k
             kwargs["max_seqlen_in_batch_k"] = max_seqlen_in_batch_k
 
+        causal_mask = self._update_causal_mask(
+            attention_mask,
+            inputs_embeds,
+            cache_position,
+            past_key_values,
+            output_attentions,
+        )
+
+        attention_mask = causal_mask
         outputs = self.decoder(
-            input_ids=None,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             position_ids=position_ids,
+            cache_position=cache_position,
             past_key_values=past_key_values,
             return_dict=True,
             use_cache=use_cache,
+            cache_idxs=cache_idxs,
+            num_valid_tokens=num_valid_tokens,
+            prefill=prefill,
+            text_lengths=text_lengths,
             **kwargs,
         )
 
         hidden_states = outputs.last_hidden_state
-        # Only keep the last `logits_to_keep` logits, should bring down memory usage during inference
         if logits_to_keep is not None:
             hidden_states = hidden_states[:, -logits_to_keep:, :]
-
         hidden_states = hidden_states.contiguous()
-        bbox_logits = F.sigmoid(self.bbox_head(hidden_states))
-        lm_logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            # Training, return full logits
+            lm_logits = self.lm_head(hidden_states)
+            bbox_logits = None
+            vocab_size = lm_logits.shape[-1]
+            labels = torch.roll(labels, shifts=-1, dims=-1)
+            loss = F.cross_entropy(
+                lm_logits.view(-1, vocab_size), labels.view(-1), reduction="mean"
+            )
+        else:
+            lm_logits, bbox_logits = self.get_logits(hidden_states)
 
         return SuryaModelOutput(
+            loss=loss,
             bbox_logits=bbox_logits,
             lm_logits=lm_logits,
             hidden_states=outputs.hidden_states if output_hidden_states else None,
             attentions=outputs.attentions if output_attentions else None,
             past_key_values=outputs.past_key_values,
         )
+
+    def _update_causal_mask(
+        self,
+        attention_mask: torch.Tensor,
+        input_tensor: torch.Tensor,
+        cache_position: torch.Tensor,
+        past_key_values: Cache,
+        output_attentions: bool,
+    ):
+        if self.decoder.config._attn_implementation == "flash_attention_2":
+            return attention_mask
+
+        # We always pass in a 2D attention mask from the processor - In both static and dynamic cache cases
+        dtype, device = input_tensor.dtype, input_tensor.device
+        min_dtype = torch.finfo(dtype).min
+        sequence_length = input_tensor.shape[1]
+        target_length = (
+            attention_mask.shape[-1]
+            if isinstance(attention_mask, torch.Tensor)
+            else past_key_values.max_cache_len
+        )
+
+        # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
+        causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
+            attention_mask,
+            sequence_length=sequence_length,
+            target_length=target_length,
+            dtype=dtype,
+            device=device,
+            cache_position=cache_position,
+            batch_size=input_tensor.shape[0],
+            config=self.config,
+            past_key_values=past_key_values,
+        )
+
+        if (
+            self.config._attn_implementation == "sdpa"
+            and attention_mask is not None
+            and attention_mask.device.type in ["cuda", "xpu"]
+            and not output_attentions
+        ):
+            # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when
+            # using left padding. This is required by F.scaled_dot_product_attention memory-efficient attention path.
+            # Details: https://github.com/pytorch/pytorch/issues/110213
+            causal_mask = AttentionMaskConverter._unmask_unattended(
+                causal_mask, min_dtype
+            )
+
+        return causal_mask
+
+    @staticmethod
+    def _prepare_4d_causal_attention_mask_with_cache_position(
+        attention_mask: torch.Tensor,
+        sequence_length: int,
+        target_length: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        cache_position: torch.Tensor,
+        batch_size: int,
+        config: SuryaModelConfig,
+        past_key_values: Cache,
+    ):
+        """
+        Creates a causal 4D mask of shape `(batch_size, 1, query_length, key_value_length)` from a 2D mask of shape
+        `(batch_size, key_value_length)`, or if the input `attention_mask` is already 4D, do nothing.
+
+        Args:
+            attention_mask (`torch.Tensor`):
+                A 2D attention mask of shape `(batch_size, key_value_length)` or a 4D attention mask of shape `(batch_size, 1, query_length, key_value_length)`.
+            sequence_length (`int`):
+                The sequence length being processed.
+            target_length (`int`):
+                The target length: when generating with static cache, the mask should be as long as the static cache, to account for the 0 padding, the part of the cache that is not filled yet.
+            dtype (`torch.dtype`):
+                The dtype to use for the 4D attention mask.
+            device (`torch.device`):
+                The device to plcae the 4D attention mask on.
+            cache_position (`torch.Tensor`):
+                Indices depicting the position of the input sequence tokens in the sequence. Shape `(batch_size, sequence_length)`.
+            batch_size (`torch.Tensor`):
+                Batch size.
+            config (`Qwen2Config`):
+                The model's configuration class
+            past_key_values (`Cache`):
+                The cache class that is being used currently to generate
+        """
+        if attention_mask is not None and attention_mask.dim() == 4:
+            # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
+            causal_mask = attention_mask
+        else:
+            min_dtype = torch.finfo(dtype).min
+            causal_mask = torch.full(
+                (sequence_length, target_length),
+                fill_value=min_dtype,
+                dtype=dtype,
+                device=device,
+            )
+            # Batch-aware diagonal attend mask
+            diagonal_attend_mask = torch.arange(target_length, device=device).unsqueeze(
+                0
+            ) > cache_position.unsqueeze(-1)
+            causal_mask = (
+                causal_mask.unsqueeze(0) * diagonal_attend_mask
+            )  # (batch_size, seq_len, target_len)
+            causal_mask = causal_mask[
+                :, None, :, :
+            ]  # (batch_size, 1, seq_len, target_len)
+            if attention_mask is not None:
+                causal_mask = (
+                    causal_mask.clone()
+                )  # copy to contiguous memory for in-place edit
+                if attention_mask.shape[-1] > target_length:
+                    attention_mask = attention_mask[:, :target_length]
+                mask_length = attention_mask.shape[-1]
+                padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[
+                    :, None, None, :
+                ].to(causal_mask.device)
+                padding_mask = padding_mask == 0
+                causal_mask[:, :, :, :mask_length] = causal_mask[
+                    :, :, :, :mask_length
+                ].masked_fill(padding_mask, min_dtype)
+        return causal_mask

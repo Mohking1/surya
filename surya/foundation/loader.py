@@ -15,17 +15,18 @@ from surya.settings import settings
 logger = get_logger()
 
 
-class RecognitionModelLoader(ModelLoader):
+class FoundationModelLoader(ModelLoader):
     def __init__(self, checkpoint: Optional[str] = None):
         super().__init__(checkpoint)
 
         if self.checkpoint is None:
-            self.checkpoint = settings.RECOGNITION_MODEL_CHECKPOINT
+            self.checkpoint = settings.FOUNDATION_MODEL_CHECKPOINT
 
     def model(
         self,
         device=settings.TORCH_DEVICE_MODEL,
         dtype=None,
+        attention_implementation: Optional[str] = None,
     ) -> SuryaModel:
         if device is None:
             device = settings.TORCH_DEVICE_MODEL
@@ -36,11 +37,16 @@ class RecognitionModelLoader(ModelLoader):
                 dtype = settings.MODEL_DTYPE_BFLOAT
             else:
                 dtype = settings.MODEL_DTYPE
+        elif dtype == torch.float16:
+            dtype = torch.bfloat16  # Model weights in bfloat16
 
         torch.set_float32_matmul_precision("high")
         config = SuryaModelConfig.from_pretrained(self.checkpoint)
 
-        if is_flash_attn_2_available() and is_flash_attn_2_supported(device):
+        if attention_implementation is not None:
+            config.decoder._attn_implementation = attention_implementation
+            config.vision_encoder._attn_implementation = attention_implementation
+        elif is_flash_attn_2_available() and is_flash_attn_2_supported(device):
             config.decoder._attn_implementation = "flash_attention_2"
             config.vision_encoder._attn_implementation = "flash_attention_2"
         else:
@@ -48,7 +54,7 @@ class RecognitionModelLoader(ModelLoader):
             config.vision_encoder._attn_implementation = "sdpa"
 
         model = SuryaModel.from_pretrained(
-            self.checkpoint, torch_dtype=dtype, config=config
+            self.checkpoint, dtype=dtype, config=config
         ).to(device)
         model = model.eval()
 
@@ -74,9 +80,8 @@ class RecognitionModelLoader(ModelLoader):
             patch_size=config.vision_encoder.patch_size,
             merge_size=config.vision_encoder.spatial_merge_size,
             model_device=device,
+            num_beacon_tokens=config.num_beacon_tokens,
+            beacon_token_interval=config.beacon_token_interval,
         )
-        config.eos_token_id = processor.eos_token_id
-        config.pad_token_id = processor.pad_token_id
-        config.bos_token_id = processor.bos_token_id
 
         return processor

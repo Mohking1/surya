@@ -9,15 +9,24 @@ from surya.settings import settings
 class BasePredictor:
     model_loader_cls = ModelLoader
     batch_size: Optional[int] = None
-    default_batch_sizes = {
-        "cpu": 1,
-        "mps": 1,
-        "cuda": 1
-    }
-    disable_tqdm: bool = settings.DISABLE_TQDM
+    default_batch_sizes = {"cpu": 1, "mps": 1, "cuda": 1}
     torch_dtype = settings.MODEL_DTYPE
 
-    def __init__(self, checkpoint: Optional[str] = None, device: torch.device | str | None = settings.TORCH_DEVICE_MODEL, dtype: Optional[torch.dtype | str] = None):
+    @property
+    def disable_tqdm(self) -> bool:
+        return self._disable_tqdm
+
+    @disable_tqdm.setter
+    def disable_tqdm(self, value: bool) -> None:
+        self._disable_tqdm = bool(value)
+
+    def __init__(
+        self,
+        checkpoint: Optional[str] = None,
+        device: torch.device | str | None = settings.TORCH_DEVICE_MODEL,
+        dtype: Optional[torch.dtype | str] = None,
+        attention_implementation: Optional[str] = None,
+    ):
         if dtype is None:
             dtype = self.torch_dtype
 
@@ -25,8 +34,10 @@ class BasePredictor:
         self.processor = None
         loader = self.model_loader_cls(checkpoint)
 
-        self.model = loader.model(device, dtype)
+        self.model = loader.model(device, dtype, attention_implementation)
         self.processor = loader.processor()
+
+        self._disable_tqdm = settings.DISABLE_TQDM
 
     def to(self, device_dtype: torch.device | str | None = None):
         if self.model:
@@ -51,7 +62,7 @@ class BasePredictor:
         pad_size = batch_size - current_batch_size
         padding = (0, 0) * (tensor.dim() - 1) + (0, pad_size)
 
-        return F.pad(tensor, padding, mode='constant', value=0)
+        return F.pad(tensor, padding, mode="constant", value=0)
 
     def __call__(self, *args, **kwargs):
         raise NotImplementedError()

@@ -24,7 +24,10 @@ class LayoutModelLoader(ModelLoader):
             self.checkpoint = settings.LAYOUT_MODEL_CHECKPOINT
 
     def model(
-        self, device=settings.TORCH_DEVICE_MODEL, dtype=settings.MODEL_DTYPE
+        self,
+        device=settings.TORCH_DEVICE_MODEL,
+        dtype=settings.MODEL_DTYPE,
+        attention_implementation: Optional[str] = None,
     ) -> SuryaLayoutModel:
         if device is None:
             device = settings.TORCH_DEVICE_MODEL
@@ -41,7 +44,7 @@ class LayoutModelLoader(ModelLoader):
         config.encoder = encoder
 
         model = SuryaLayoutModel.from_pretrained(
-            self.checkpoint, config=config, torch_dtype=dtype
+            self.checkpoint, config=config, dtype=dtype
         )
         model = model.to(device)
         model = model.eval()

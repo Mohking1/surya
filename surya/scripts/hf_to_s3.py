@@ -12,10 +12,13 @@ from tqdm import tqdm
 S3_API_URL = "https://1afbe4656a6b40d982ab5e730a39f6b9.r2.cloudflarestorage.com"
 
 
+# Example usage - python scripts/hf_to_s3.py <REPO_NAME> layout
+# This will upload to s3://layout/TODAYS_DATE
 @click.command(help="Uploads the data from huggingface to an S3 bucket")
 @click.argument("hf_repo_id", type=str)
 @click.argument("s3_path", type=str)
 @click.option("--bucket_name", type=str, default="datalab")
+@click.option("--revision_hash", type=str, default=None)
 @click.option("--access_key_id", type=str, default="<access_key_id>")
 @click.option("--access_key_secret", type=str, default="<access_key_secret>")
 @click.option("--suffix", type=str, default="")
@@ -23,6 +26,7 @@ def main(
     hf_repo_id: str,
     s3_path: str,
     bucket_name: str,
+    revision_hash: str,
     access_key_id: str,
     access_key_secret: str,
     suffix: str,
@@ -32,7 +36,7 @@ def main(
     if suffix:
         s3_path = f"{s3_path}_{suffix}"
 
-    download_folder = snapshot_download(repo_id=hf_repo_id)
+    download_folder = snapshot_download(repo_id=hf_repo_id, revision=revision_hash)
     download_folder = Path(download_folder)
     contained_files = list(download_folder.glob("*"))
     contained_files = [f.name for f in contained_files]  # Just get the base name

@@ -3,6 +3,8 @@ from typing import Optional, Union, Tuple, Dict
 
 import torch
 from transformers import PreTrainedModel, VisionEncoderDecoderConfig, PretrainedConfig
+
+from surya.common.pretrained import SuryaPreTrainedModel
 from surya.common.s3 import S3DownloaderMixin
 from surya.table_rec.model.decoder import SuryaTableRecDecoder
 from surya.table_rec.model.encoder import DonutSwinModel
@@ -15,7 +17,7 @@ class TableRecOutput(ModelOutput):
     decoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
 
 
-class TableRecEncoderDecoderModel(S3DownloaderMixin, PreTrainedModel):
+class TableRecEncoderDecoderModel(S3DownloaderMixin, SuryaPreTrainedModel):
     config_class = VisionEncoderDecoderConfig
     base_model_prefix = "vision_encoder_decoder"
     main_input_name = "pixel_values"
@@ -27,18 +29,21 @@ class TableRecEncoderDecoderModel(S3DownloaderMixin, PreTrainedModel):
         config: Optional[PretrainedConfig] = None,
         encoder: Optional[PreTrainedModel] = None,
         decoder: Optional[PreTrainedModel] = None,
+        **kwargs,
     ):
         # initialize with config
         # make sure input & output embeddings is not tied
         config.tie_word_embeddings = False
         config.decoder.tie_word_embeddings = False
-        super().__init__(config)
+        super().__init__(config, **kwargs)
 
         if encoder is None:
             encoder = DonutSwinModel(config.encoder)
 
         if decoder is None:
-            decoder = SuryaTableRecDecoder(config.decoder, attn_implementation=config._attn_implementation)
+            decoder = SuryaTableRecDecoder(
+                config.decoder, attn_implementation=config._attn_implementation
+            )
 
         self.encoder = encoder
         self.decoder = decoder
@@ -70,10 +75,10 @@ class TableRecEncoderDecoderModel(S3DownloaderMixin, PreTrainedModel):
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> Union[Tuple[torch.FloatTensor], TableRecOutput]:
-        kwargs_encoder = {argument: value for argument, value in kwargs.items() if not argument.startswith("decoder_")}
-
         kwargs_decoder = {
-            argument[len("decoder_") :]: value for argument, value in kwargs.items() if argument.startswith("decoder_")
+            argument[len("decoder_") :]: value
+            for argument, value in kwargs.items()
+            if argument.startswith("decoder_")
         }
 
         # Decode

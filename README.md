@@ -11,6 +11,8 @@ Surya is a document OCR toolkit that does:
 
 It works on a range of documents (see [usage](#usage) and [benchmarks](#benchmarks) for more details).
 
+For our managed API or on-prem document intelligence solution, check out [our platform here](https://datalab.to?utm_source=gh-surya).
+
 
 |                            Detection                             |                                   OCR                                   |
 |:----------------------------------------------------------------:|:-----------------------------------------------------------------------:|
@@ -49,7 +51,7 @@ Surya is named for the [Hindu sun god](https://en.wikipedia.org/wiki/Surya), who
 
 # Hosted API
 
-There is a hosted API for all surya models available [here](https://www.datalab.to/):
+There is a hosted API for all surya models available [here](https://www.datalab.to?utm_source=gh-surya):
 
 - Works with PDF, images, word docs, and powerpoints
 - Consistent speed, with no latency spikes
@@ -57,9 +59,8 @@ There is a hosted API for all surya models available [here](https://www.datalab.
 
 # Commercial usage
 
-I want surya to be as widely accessible as possible, while still funding my development/training costs. Research and personal usage is always okay, but there are some restrictions on commercial usage.
+Our model weights use a modified AI Pubs Open Rail-M license (free for research, personal use, and startups under $2M funding/revenue) and our code is GPL. For broader commercial licensing or to remove GPL requirements, visit our pricing page [here](https://www.datalab.to/pricing?utm_source=gh-surya).
 
-The weights for the models are licensed `cc-by-nc-sa-4.0`, but I will waive that for any organization under \$2M USD in gross revenue in the most recent 12-month period AND under \$2M in lifetime VC/angel funding raised. You also must not be competitive with the [Datalab API](https://www.datalab.to/).  If you want to remove the GPL license requirements (dual-license) and/or use the weights commercially over the revenue limit, check out the options [here](https://www.datalab.to).
 
 # Installation
 
@@ -132,11 +133,13 @@ Setting the `RECOGNITION_BATCH_SIZE` env var properly will make a big difference
 
 ```python
 from PIL import Image
+from surya.foundation import FoundationPredictor
 from surya.recognition import RecognitionPredictor
 from surya.detection import DetectionPredictor
 
 image = Image.open(IMAGE_PATH)
-recognition_predictor = RecognitionPredictor()
+foundation_predictor = FoundationPredictor()
+recognition_predictor = RecognitionPredictor(foundation_predictor)
 detection_predictor = DetectionPredictor()
 
 predictions = recognition_predictor([image], det_predictor=detection_predictor)
@@ -237,7 +240,7 @@ surya_table DATA_PATH
 - `--images` will save images of the pages and detected table cells + rows and columns (optional)
 - `--output_dir` specifies the directory to save results to instead of the default
 - `--page_range` specifies the page range to process in the PDF, specified as a single number, a comma separated list, a range, or comma separated ranges - example: `0,5-10,20`.
-- `--detect_boxes` specifies if cells should be detected.  By default, they're pulled out of the PDF, but this is not always possible. 
+- `--detect_boxes` specifies if cells should be detected.  By default, they're pulled out of the PDF, but this is not always possible.
 - `--skip_table_detection` tells table recognition not to detect tables first.  Use this if your image is already cropped to a table.
 
 The `results.json` file will contain a json dictionary where the keys are the input filenames without extensions.  Each value will be a list of dictionaries, one per page of the input document.  Each page dictionary contains:
@@ -466,7 +469,7 @@ This inferences texify on a ground truth set of LaTeX, then does edit distance. 
 
 ## Running your own benchmarks
 
-You can benchmark the performance of surya on your machine.  
+You can benchmark the performance of surya on your machine.
 
 - Follow the manual install instructions above.
 - `poetry install --group dev` - installs dev dependencies
@@ -547,6 +550,25 @@ python benchmark/texify.py --max_rows 128
 Text detection was trained on 4x A6000s for 3 days.  It used a diverse set of images as training data.  It was trained from scratch using a modified efficientvit architecture for semantic segmentation.
 
 Text recognition was trained on 4x A6000s for 2 weeks.  It was trained using a modified donut model (GQA, MoE layer, UTF-16 decoding, layer config changes).
+
+# Finetuning Surya OCR
+You can now take Surya OCR further by training it on your own data with our [finetuning script](/surya/scripts/finetune_ocr.py).
+It’s built on Hugging Face Trainer, and supports all the [arguments](https://huggingface.co/docs/transformers/en/main_classes/trainer#transformers.TrainingArguments) that the huggingface trainer provides, and integrations like torchrun, or deepspeed.
+
+To setup your dataset, follow the example dataset format [here](https://huggingface.co/datasets/datalab-to/ocr_finetune_example) and provide the path to your own dataset when launching the training script.
+```bash
+# Tested on 1xH100 GPU
+# Set --pretrained_checkpoint_path to load from a custom checkpoint, otherwise
+# the default surya ocr weights will be loaded as the initialization
+python surya/scripts/finetune_ocr.py \
+  --output_dir $OUTPUT_DIR \
+  --dataset_name datalab-to/ocr_finetune_example \
+  --per_device_train_batch_size 64 \
+  --gradient_checkpointing true \
+  --max_sequence_length 1024
+```
+
+This is a minimal training script to get you started finetuning Surya. Our internal training stack includes character bounding box finetuning, sliding window attention with specialized attention masks, custom kernels, augmentations, and other optimizations that can push OCR accuracy well beyond standard finetuning. If you want to get the most out of your data, reach us at hi@datalab.to!
 
 # Thanks
 

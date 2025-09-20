@@ -6,6 +6,7 @@ from collections import defaultdict
 
 from surya.logging import configure_logging, get_logger
 from surya.scripts.config import CLILoader
+from surya.foundation import FoundationPredictor
 from surya.layout import LayoutPredictor
 from surya.table_rec import TableRecPredictor
 from surya.debug.draw import draw_bboxes_on_image

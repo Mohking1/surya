@@ -24,6 +24,7 @@ class DetectionModelLoader(ModelLoader):
         self,
         device: Optional[torch.device | str] = None,
         dtype: Optional[torch.dtype | str] = None,
+        attention_implementation: Optional[str] = None,
     ) -> EfficientViTForSemanticSegmentation:
         if device is None:
             device = settings.TORCH_DEVICE_MODEL

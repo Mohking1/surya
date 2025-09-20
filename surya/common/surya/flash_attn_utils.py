@@ -111,7 +111,6 @@ def flash_attn_prefill(
     attention_mask: torch.Tensor,
     dropout: float,
     scaling: float,
-    sliding_window: Optional[int],
     query_length: int,
     batch_size: int,
     indices_k: torch.Tensor,
@@ -135,8 +134,6 @@ def flash_attn_prefill(
     cu_seqlens_q, cu_seqlens_k = cu_seq_lens
     max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
 
-    flash_kwargs = {"window_size": (sliding_window, sliding_window)} if sliding_window else {}
-
     # Returning None for attn_weights to match other attention interfaces
     flash_attn_out = _flash_attn_varlen_func(
         q_flash,
@@ -149,11 +146,11 @@ def flash_attn_prefill(
         dropout_p=dropout,
         softmax_scale=scaling,
         causal=module.is_causal,
-        **flash_kwargs
     )
     return pad_input(flash_attn_out, indices_q, batch_size, query_length), None
 
 # NOTE: Does not support dropout, accepts argument as kwargs to maintain compatibility
+# This function is an order of magnitude faster than the prefill variant, or using the HF interface
 def flash_attn_decode(
     module: torch.nn.Module,
     query_states: torch.Tensor,
@@ -161,29 +158,39 @@ def flash_attn_decode(
     value_states: torch.Tensor,
     attention_mask: torch.Tensor,
     scaling: float,
-    sliding_window: bool,
     **kwargs,
 ):
     """
     Wrapper for flash attention during the decode stage
     
-    query_states must have shape (batch_size, num_heads, 1, head_dim), 1 is the seq length in the decoding stage
+    query_states must have shape (batch_size, num_heads, seq_len, head_dim), 1 is the seq length in the decoding stage
     key_states and value_states must have shape (batch_size, num_kv_heads, kv_len, head_dim)
 
     This is the opposite of what is required by flash attention, but keeps parity with the HF convention
+
+    This function computes the left pad and cache seqlens to pass into FA2. For example - 
+    Given an attention_mask shaped (batch_size=2, seq_len=8), where 0 = padding, 1 = real token
+    attention_mask =
+    tensor([
+        [0, 0, 1, 1, 1, 0, 0, 0],  # ← batch 0
+        [0, 1, 1, 1, 1, 1, 1, 0],  # ← batch 1
+    ])
+    cache_leftpad = tensor([2, 1], dtype=torch.int32)
+    cache_seqlens = tensor([5, 7], dtype=torch.int32)
+    These values allow FlashAttention to use a static cache layout with efficient slicing during decoding.
     """
     query_states, key_states, value_states = query_states.transpose(1,2), key_states.transpose(1,2), value_states.transpose(1,2)
-    cache_leftpad = (attention_mask == 0).cumprod(dim=1).sum(dim=1)
-    cache_leftpad = cache_leftpad.to(torch.int32)
-    
-    flash_kwargs = {'window_size': (sliding_window, sliding_window)} if sliding_window else {}
+
+    cache_leftpad = (attention_mask == 0).cumprod(dim=1).sum(dim=1).to(torch.int32)
+    cache_seqlens = (attention_mask * torch.arange(attention_mask.size(1), device=attention_mask.device)).argmax(dim=1).to(torch.int32) + 1
+
     # Returning None for attn_weights to match other attention interfaces
     return _flash_attn_with_kvcache(
         q=query_states,
         k_cache=key_states,
         v_cache=value_states,
         cache_leftpad=cache_leftpad,
+        cache_seqlens=cache_seqlens,
         causal=module.is_causal,
         softmax_scale=scaling,
-        **flash_kwargs
     ), None

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "surya-ocr"
-version = "0.14.7"
+version = "0.16.7"
 description = "OCR, layout, reading order, and table recognition in 90+ languages"
 authors = ["Vik Paruchuri <vik.paruchuri@gmail.com>"]
 readme = "README.md"
@@ -13,7 +13,7 @@ packages = [
 
 [tool.poetry.dependencies]
 python = "^3.10"
-transformers = ">=4.51.2,<4.54.0"
+transformers = ">=4.56.1"
 torch = "^2.7.0"
 pydantic = "^2.5.3"
 pydantic-settings = "^2.1.0"
@@ -23,7 +23,7 @@ pypdfium2 = "=4.30.0"
 filetype = "^1.2.0"
 click = "^8.1.8"
 platformdirs = "^4.3.6"
-opencv-python-headless = "^4.11.0.86"
+opencv-python-headless = "==4.11.0.86"
 einops = "^0.8.1"
 pre-commit = "^4.2.0"
 

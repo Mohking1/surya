@@ -29,6 +29,51 @@ def unwrap_math(text: str) -> str:
 
 MATH_BLOCK = re.compile(r"(<math\b[^>]*>)(.*?)</math>", flags=re.I | re.S)
 STRIP_TAGS = re.compile(r"</?(?:br|u|del|mark|i|b|sup|sub)\b[^>]*>", flags=re.I | re.S)
+DEFAULT_TAGS_TO_FILTER = ["p", "li", "ul", "ol", "table", "td", "tr", "th", "tbody", "pre"]
+
+def filter_blacklist_tags(text_chars: List[TextChar], tags_to_filter: List[str] = None) -> List[TextChar]:
+    filtered_chars = []
+    char_buffer = []
+    in_tag = False
+    if tags_to_filter is None:
+        tags_to_filter = DEFAULT_TAGS_TO_FILTER
+
+    for text_char in text_chars:
+        char = text_char.text
+
+        if char.startswith("<") or in_tag:
+            in_tag = True
+            char_buffer.append(text_char)
+            if char.endswith(">"):
+                full_tag = ''.join(c.text for c in char_buffer)
+                inner = full_tag[1:-1].strip()  # remove < >
+                inner = inner.strip("/")  # remove '/'
+                
+                # Possible that it is just an empty <>
+                if not inner:
+                    filtered_chars.extend(char_buffer)
+                    in_tag = False
+                    char_buffer = []
+                    continue
+                
+                tag_name_candidate = inner.split()[0]   # remove any attributes
+                if tag_name_candidate in tags_to_filter:
+                    # Discard tag
+                    pass
+                else:
+                    # Keep tag
+                    filtered_chars.extend(char_buffer)
+
+                in_tag = False
+                char_buffer = []
+        else:
+            filtered_chars.append(text_char)
+
+    # Flush buffer if we never reached a tag close
+    if char_buffer:
+        filtered_chars.extend(char_buffer)
+
+    return filtered_chars
 
 
 def clean_math_tags(html: str) -> str:
@@ -54,19 +99,6 @@ def clean_math_tags(html: str) -> str:
         else:
             parts.append(token)
     return "".join(parts)
-
-
-def detect_repeat_token(predicted_tokens: List[int], max_repeats: int = 40):
-    if len(predicted_tokens) < max_repeats:
-        return False
-
-    # Detect repeats containing 1 or 2 tokens
-    last_n = predicted_tokens[-max_repeats:]
-    unique_tokens = len(set(last_n))
-    if unique_tokens > 5:
-        return False
-
-    return last_n[-unique_tokens:] == last_n[-unique_tokens * 2 : -unique_tokens]
 
 
 def sort_text_lines(lines: List[TextLine] | List[dict], tolerance=1.25):
@@ -152,55 +184,3 @@ def words_from_chars(chars: List[TextChar], line_box: PolygonBox):
         words.append(word)
 
     return words
-
-
-def prediction_to_polygon_batch(
-    pred: torch.Tensor,
-    img_sizes: List[Tuple[int, int]],
-    bbox_scaler,
-    skew_scaler,
-    skew_min=0.001,
-):
-    img_sizes = torch.from_numpy(numpy.array(img_sizes, dtype=numpy.float32)).to(
-        pred.device
-    )
-    w_scale = (img_sizes[:, 1] / bbox_scaler)[:, None, None]
-    h_scale = (img_sizes[:, 0] / bbox_scaler)[:, None, None]
-
-    cx = pred[:, :, 0]
-    cy = pred[:, :, 1]
-    width = pred[:, :, 2]
-    height = pred[:, :, 3]
-
-    x1 = cx - width / 2
-    y1 = cy - height / 2
-    x2 = cx + width / 2
-    y2 = cy + height / 2
-
-    skew_x = torch.floor((pred[:, :, 4] - skew_scaler) / 2)
-    skew_y = torch.floor((pred[:, :, 5] - skew_scaler) / 2)
-
-    skew_x[torch.abs(skew_x) < skew_min] = 0
-    skew_y[torch.abs(skew_y) < skew_min] = 0
-
-    polygons_flat = torch.stack(
-        [
-            x1 - skew_x,
-            y1 - skew_y,
-            x2 - skew_x,
-            y1 + skew_y,
-            x2 + skew_x,
-            y2 + skew_y,
-            x1 + skew_x,
-            y2 - skew_y,
-        ],
-        dim=2,
-    )
-
-    batch_size, seq_len, _ = pred.shape
-    polygons = polygons_flat.view(batch_size, seq_len, 4, 2)
-
-    polygons[:, :, :, 0] *= w_scale
-    polygons[:, :, :, 1] *= h_scale
-
-    return polygons

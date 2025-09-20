@@ -76,13 +76,16 @@ class Settings(BaseSettings):
     COMPILE_DETECTOR: bool = False
 
     # Text recognition
-    RECOGNITION_MODEL_CHECKPOINT: str = "s3://text_recognition/2025_05_16"
-    RECOGNITION_MODEL_QUANTIZE: bool = False
-    RECOGNITION_MAX_TOKENS: Optional[int] = None
+    FOUNDATION_MODEL_CHECKPOINT: str = "s3://text_recognition/2025_08_29"
+    FOUNDATION_MODEL_QUANTIZE: bool = False
+    FOUNDATION_MAX_TOKENS: Optional[int] = None
+    FOUNDATION_CHUNK_SIZE: Optional[int] = None
+    COMPILE_FOUNDATION: bool = False
+    FOUNDATION_MULTI_TOKEN_MIN_CONFIDENCE: float = 0.9
+
     RECOGNITION_BATCH_SIZE: Optional[int] = (
         None  # Defaults to 8 for CPU/MPS, 256 otherwise
     )
-    RECOGNITION_CHUNK_SIZE: Optional[int] = None
     RECOGNITION_RENDER_FONTS: Dict[str, str] = {
         "all": os.path.join(FONT_DIR, "GoNotoCurrent-Regular.ttf"),
         "zh": os.path.join(FONT_DIR, "GoNotoCJKCore.ttf"),
@@ -107,6 +110,7 @@ class Settings(BaseSettings):
     LAYOUT_BENCH_DATASET_NAME: str = "vikp/publaynet_bench"
     LAYOUT_MAX_BOXES: int = 100
     COMPILE_LAYOUT: bool = False
+    LAYOUT_BENCH_DATASET_NAME: str = "vikp/publaynet_bench"
     ORDER_BENCH_DATASET_NAME: str = "vikp/order_bench"
 
     # Table Rec
@@ -143,6 +147,14 @@ class Settings(BaseSettings):
         return (
             self.COMPILE_ALL or self.COMPILE_LAYOUT or self.TORCH_DEVICE_MODEL == "xla"
         )
+
+    @computed_field
+    def FOUNDATION_STATIC_CACHE(self) -> bool:
+        return (
+            self.COMPILE_ALL
+            or self.COMPILE_FOUNDATION
+            or self.TORCH_DEVICE_MODEL == "xla"
+        )  # We need to static cache and pad to batch size for XLA, since it will recompile otherwise
 
     @computed_field
     def TABLE_REC_STATIC_CACHE(self) -> bool:

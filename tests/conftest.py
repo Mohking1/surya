@@ -9,8 +9,14 @@ from surya.detection import DetectionPredictor
 from surya.ocr_error import OCRErrorPredictor
 from surya.layout import LayoutPredictor
 from surya.recognition import RecognitionPredictor
+from surya.foundation import FoundationPredictor
 from surya.table_rec import TableRecPredictor
 
+@pytest.fixture(scope="session")
+def foundation_predictor() -> FoundationPredictor:
+    foundation_predictor = FoundationPredictor()
+    yield foundation_predictor
+    del foundation_predictor
 
 @pytest.fixture(scope="session")
 def ocr_error_predictor() -> OCRErrorPredictor:
@@ -34,8 +40,8 @@ def detection_predictor() -> DetectionPredictor:
 
 
 @pytest.fixture(scope="session")
-def recognition_predictor() -> RecognitionPredictor:
-    recognition_predictor = RecognitionPredictor()
+def recognition_predictor(foundation_predictor) -> RecognitionPredictor:
+    recognition_predictor = RecognitionPredictor(foundation_predictor)
     yield recognition_predictor
     del recognition_predictor
 
@@ -72,4 +78,11 @@ def test_image_tall():
         fill="black",
         font_size=24,
     )
+    return image
+
+@pytest.fixture()
+def test_image_latex():
+    assets_dir = os.path.join(os.path.dirname(__file__), "assets")
+    img_path = os.path.join(assets_dir, "test_latex.png")
+    image = Image.open(img_path).convert("RGB")
     return image

@@ -13,6 +13,7 @@ class ModelLoader:
         self,
         device: torch.device | str | None = settings.TORCH_DEVICE_MODEL,
         dtype: Optional[torch.dtype | str] = settings.MODEL_DTYPE,
+        attention_implementation: Optional[str] = None,
     ) -> Any:
         raise NotImplementedError()
 

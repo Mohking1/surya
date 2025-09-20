@@ -8,7 +8,6 @@ import torch.utils.checkpoint
 from torch import nn
 
 from transformers.activations import ACT2FN
-from transformers.modeling_utils import PreTrainedModel
 from transformers.pytorch_utils import (
     find_pruneable_heads_and_indices,
     meshgrid,
@@ -17,6 +16,7 @@ from transformers.pytorch_utils import (
 from transformers.utils import ModelOutput
 from transformers import DonutSwinConfig
 
+from surya.common.pretrained import SuryaPreTrainedModel
 from surya.common.util import mark_step
 
 _EXPECTED_OUTPUT_SHAPE = [1, 49, 1024]
@@ -932,7 +932,7 @@ class DonutSwinEncoder(nn.Module):
 
 
 # Copied from transformers.models.swin.modeling_swin.SwinPreTrainedModel with Swin->DonutSwin
-class DonutSwinPreTrainedModel(PreTrainedModel):
+class DonutSwinPreTrainedModel(SuryaPreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
